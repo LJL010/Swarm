@@ -23,7 +23,6 @@ def validate_dynamic_meo_setup(config: Config) -> bool:
 
         # 检查是否有动态MEO位置数据
         has_dynamic_meo = 'meo_positions_per_slot' in data
-        has_static_meo = 'meo_positions' in data
 
         if has_dynamic_meo:
             print("✅ 检测到动态MEO位置数据")
@@ -35,9 +34,6 @@ def validate_dynamic_meo_setup(config: Config) -> bool:
             if meo_slots != leo_slots:
                 print(f"⚠️  警告: MEO和LEO时间槽数不匹配")
                 return False
-
-        elif has_static_meo:
-            print("ℹ️  检测到静态MEO位置数据，将进行兼容性处理")
 
         else:
             print("❌ 未找到MEO位置数据")

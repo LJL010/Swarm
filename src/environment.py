@@ -259,7 +259,6 @@ def analyze_network_topology(
         'average_degree': 0.0,
         'cluster_analysis': {},
         'network_efficiency': 0.0,
-        'meo_positions': [],
         'leo_meo_distances': []
     }
 
@@ -275,15 +274,6 @@ def analyze_network_topology(
     for meo_id, meo in meos.items():
         cluster_stats = calculate_meo_cluster_connectivity(meo, leos)
         analysis['cluster_analysis'][meo_id] = cluster_stats
-
-        # 记录MEO位置
-        analysis['meo_positions'].append({
-            'meo_id': meo_id,
-            'latitude': meo.latitude,
-            'longitude': meo.longitude,
-            'altitude': meo.altitude,
-            'cluster_size': len(meo.cluster_leos)
-        })
 
     # 计算LEO到其管理MEO的距离分布
     for leo in leos.values():
