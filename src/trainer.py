@@ -1,9 +1,9 @@
-"""MEO-LEO集群路由训练脚本 - 支持动态MEO"""
+"""MEO-LEO集群路由训练脚本 - 简化版本"""
 import sys
 import os
-root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(root_path)
-import os
+# 获取项目根目录路径（假设当前文件在 src 目录，上级目录就是根目录）
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(project_root)
 import json
 import random
 import numpy as np
@@ -11,17 +11,32 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple
 import logging
 from datetime import datetime
-
 from config import Config
 from satellites import LEOSatellite, MEOSatellite
 from rl_agent import RLAgent
-from routing import route_request_with_intelligent_edge_selection
-from environment import find_nearest_available_leo, analyze_network_topology, update_dynamic_meo_clusters
+from routing import route_request_optimized
+from environment import analyze_network_topology, update_dynamic_meo_clusters
 from data.data_loader import load_complete_environment, validate_dynamic_meo_data
 
 
+class PacketInfo:
+    """包信息类，简化包的状态管理"""
+    def __init__(self, packet_id: int, src: int, dst: int, start_slot: int):
+        self.id = packet_id
+        self.src = src
+        self.dst = dst
+        self.current_pos = src
+        self.start_slot = start_slot
+        self.end_slot = None
+        self.path = []
+        self.hops_completed = 0
+        self.status = 'new'  # new, routing, completed, failed
+        self.routing_stats = {}
+        self.last_update_slot = start_slot
+
+
 class TrainingEnvironment:
-    """训练环境类 - 支持动态MEO"""
+    """简化的训练环境类"""
 
     def __init__(self, config: Config):
         self.config = config
@@ -32,11 +47,11 @@ class TrainingEnvironment:
         self.episode_rewards = []
         self.episode_success_rates = []
         self.episode_avg_path_lengths = []
+        self.episode_convergence_rates = []
 
         # 动态MEO相关统计
-        self.meo_position_stats = []
-        self.cluster_reassignment_stats = []
-        self.network_topology_stats = []
+        self.meo_reassignment_episodes = []
+        self.network_efficiency_evolution = []
 
     def setup_logging(self):
         """设置日志"""
@@ -67,25 +82,6 @@ class TrainingEnvironment:
         for directory in directories:
             os.makedirs(directory, exist_ok=True)
 
-    def validate_data_compatibility(self, data_file: str) -> bool:
-        """验证数据文件是否支持动态MEO"""
-        try:
-            with open(data_file, 'r') as f:
-                data = json.load(f)
-
-            is_dynamic_meo = validate_dynamic_meo_data(data)
-
-            if is_dynamic_meo:
-                self.logger.info("检测到动态MEO数据，启用动态MEO训练模式")
-            else:
-                self.logger.info("使用静态MEO数据，MEO位置在所有时间槽保持不变")
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"数据验证失败: {e}")
-            return False
-
     def train(self):
         """执行训练"""
         self.logger.info("开始训练...")
@@ -95,46 +91,60 @@ class TrainingEnvironment:
         random.seed(random_seed)
         np.random.seed(random_seed)
 
-        # 获取数据文件路径并验证
+        # 获取数据文件路径
         data_file = self.config.get('data.data_file', 'data/data.json')
-        if not self.validate_data_compatibility(data_file):
-            self.logger.error("数据文件验证失败，无法开始训练")
+        if not os.path.exists(data_file):
+            self.logger.error(f"数据文件不存在: {data_file}")
+            return
+
+        # 验证数据兼容性
+        try:
+            with open(data_file, 'r') as f:
+                data = json.load(f)
+            validate_dynamic_meo_data(data)
+        except Exception as e:
+            self.logger.error(f"数据验证失败: {e}")
             return
 
         # 初始化智能体
         agent = RLAgent(
             learning_rate=self.config.get('rl_agent.learning_rate', 0.1),
             gamma=self.config.get('rl_agent.gamma', 0.9),
-            epsilon=self.config.get('rl_agent.epsilon', 0.1)
+            epsilon=self.config.get('rl_agent.epsilon', 0.1),
+            epsilon_decay=self.config.get('rl_agent.epsilon_decay', 0.995),
+            epsilon_min=self.config.get('rl_agent.epsilon_min', 0.01)
         )
 
         # 训练参数
         num_episodes = self.config.get('training.num_episodes', 1000)
-        max_steps = self.config.get('training.max_steps_per_episode', 100)
         save_interval = self.config.get('training.save_interval', 100)
 
+        self.logger.info(f"开始训练 {num_episodes} 个episodes")
+
         for episode in range(num_episodes):
-            episode_reward, success_rate, avg_path_length = self.run_episode(
-                agent, data_file, max_steps
+            episode_reward, success_rate, avg_path_length, convergence_rate = self.run_episode_simplified(
+                agent, data_file, episode
             )
 
             # 记录统计信息
             self.episode_rewards.append(episode_reward)
             self.episode_success_rates.append(success_rate)
             self.episode_avg_path_lengths.append(avg_path_length)
+            self.episode_convergence_rates.append(convergence_rate)
 
-            # 更新epsilon（探索率衰减）
-            epsilon_decay = self.config.get('rl_agent.epsilon_decay', 0.995)
-            epsilon_min = self.config.get('rl_agent.epsilon_min', 0.01)
-            agent.epsilon = max(epsilon_min, agent.epsilon * epsilon_decay)
+            # 衰减探索率
+            agent.decay_epsilon()
 
             # 日志输出
-            if episode % 100 == 0:
+            if episode % 50 == 0:
+                agent_stats = agent.get_statistics()
                 self.logger.info(
                     f"Episode {episode}: Reward={episode_reward:.2f}, "
-                    f"Success Rate={success_rate:.2f}, "
+                    f"Success Rate={success_rate:.2%}, "
                     f"Avg Path Length={avg_path_length:.2f}, "
-                    f"Epsilon={agent.epsilon:.3f}"
+                    f"Convergence Rate={convergence_rate:.2%}, "
+                    f"Epsilon={agent.epsilon:.3f}, "
+                    f"States={agent_stats['total_states']}"
                 )
 
             # 保存模型
@@ -148,384 +158,216 @@ class TrainingEnvironment:
         if self.config.get('output.plot_results', True):
             self.plot_training_results()
 
-    def run_episode(self, agent: RLAgent, data_file: str, max_steps: int) -> Tuple[float, float, float]:
-        """改进的episode运行逻辑 - 支持动态MEO"""
-
-        # 载入训练查询和时间槽数量
+    def run_episode_simplified(self, agent: RLAgent, data_file: str, episode: int) -> Tuple[float, float, float, float]:
+        """
+        简化的episode运行逻辑，专注于路由训练
+        """
+        # 加载数据
         with open(data_file, 'r') as f:
             data = json.load(f)
+
         train_queries = data.get('train_queries', [])
         num_time_slots = data.get('num_train_slots', self.config.get('network.num_time_slots', 50))
 
-        # 统计数据
+        if not train_queries:
+            self.logger.warning("没有训练查询数据")
+            return 0.0, 0.0, 0.0, 0.0
+
+        # 统计变量
         total_reward = 0.0
         successful_routes = 0
         total_routes = 0
         total_path_length = 0
+        routing_attempts = 0
+        quick_convergences = 0  # 快速收敛的路由数量
 
-        # 包管理：每个包的状态 {packet_id: PacketInfo}
-        active_packets = {}
-        completed_packets = []
-        next_packet_id = 0
+        # 随机选择部分时间槽进行训练（提高效率）
+        selected_slots = sorted(random.sample(
+            range(min(num_time_slots, len(data.get('sat_positions_per_slot', [])))),
+            min(10, num_time_slots)  # 每个episode最多处理10个时间槽
+        ))
 
-        # 动态MEO统计
-        meo_reassignments = 0
-        topology_changes = []
+        meo_reassignments_this_episode = 0
 
-        # 按slot进行模拟
-        for current_slot in range(num_time_slots):
-            if total_routes >= max_steps:
-                break
-
-            self.logger.debug(f"\n=== Processing Slot {current_slot} ===")
-
-            # 1. 处理新到达的查询请求
-            new_queries = [q for q in train_queries if q['time'] == current_slot]
-            for query in new_queries:
-                packet_info = {
-                    'id': next_packet_id,
-                    'src': query['src'],
-                    'dst': query['dst'],
-                    'current_pos': query['src'],
-                    'path': [],
-                    'path_index': 0,  # 当前在路径中的位置
-                    'start_slot': current_slot,
-                    'hops_completed': 0,
-                    'status': 'new'  # new, routing, forwarding, completed, failed
-                }
-                active_packets[next_packet_id] = packet_info
-                total_routes += 1
-                next_packet_id += 1
-                self.logger.debug(f"New packet {next_packet_id - 1} arrived: {query['src']} -> {query['dst']}")
-
-            # 2. 载入当前slot的网络环境（包含动态MEO）
+        for slot_idx, current_slot in enumerate(selected_slots):
+            # 加载当前时间槽的网络环境
             try:
                 leos, meos, _ = load_complete_environment(current_slot, data_file)
             except Exception as e:
-                self.logger.error(f"加载时间槽 {current_slot} 环境失败: {e}")
+                self.logger.debug(f"加载时间槽 {current_slot} 失败: {e}")
                 continue
 
-            # 3. 分析网络拓扑变化（可选）
-            if current_slot % 10 == 0:  # 每10个slot分析一次
-                topology_analysis = analyze_network_topology(leos, meos)
-                topology_changes.append({
-                    'slot': current_slot,
-                    'analysis': topology_analysis
-                })
+            # 动态MEO重分配（每几个episode一次）
+            if episode % 10 == 0 and slot_idx == 0:
+                if self.config.get('network.enable_dynamic_meo_reassignment', False):
+                    try:
+                        original_assignments = {leo.id: leo.meo_id for leo in leos.values()}
+                        new_assignments = update_dynamic_meo_clusters(leos, meos)
+                        reassignments = sum(1 for leo_id in original_assignments
+                                          if original_assignments[leo_id] != new_assignments.get(leo_id, -1))
+                        if reassignments > 0:
+                            meo_reassignments_this_episode += reassignments
+                            self.logger.debug(f"Episode {episode}, Slot {current_slot}: {reassignments} MEO reassignments")
+                    except Exception as e:
+                        self.logger.debug(f"MEO重分配失败: {e}")
 
-                self.logger.debug(f"Slot {current_slot} topology: "
-                                f"Network efficiency = {topology_analysis['network_efficiency']:.3f}")
+            # 获取当前时间槽的查询
+            slot_queries = [q for q in train_queries if q['time'] == current_slot]
 
-            # 4. 动态MEO集群重分配（可选，用于适应MEO移动）
-            enable_dynamic_reassignment = self.config.get('network.enable_dynamic_meo_reassignment', False)
-            if enable_dynamic_reassignment and current_slot % 5 == 0:  # 每5个slot重分配一次
+            # 如果当前槽没有查询，随机生成一些查询用于训练
+            if not slot_queries and len(leos) >= 2:
+                num_random_queries = random.randint(1, 3)
+                leo_ids = list(leos.keys())
+                for _ in range(num_random_queries):
+                    src, dst = random.sample(leo_ids, 2)
+                    slot_queries.append({'src': src, 'dst': dst, 'time': current_slot})
+
+            # 处理查询
+            for query in slot_queries:
+                if total_routes >= 100:  # 限制每个episode的最大查询数
+                    break
+
+                src_id = query['src']
+                dst_id = query['dst']
+
+                # 验证节点存在性
+                if src_id not in leos or dst_id not in leos:
+                    continue
+
+                total_routes += 1
+                routing_attempts += 1
+
+                # 执行路由
+                start_time = datetime.now()
                 try:
-                    original_assignments = {leo.id: leo.meo_id for leo in leos.values()}
-                    new_assignments = update_dynamic_meo_clusters(leos, meos)
-
-                    # 统计重分配情况
-                    reassignment_count = sum(1 for leo_id in original_assignments
-                                           if original_assignments[leo_id] != new_assignments.get(leo_id, -1))
-
-                    if reassignment_count > 0:
-                        meo_reassignments += reassignment_count
-                        self.logger.debug(f"Slot {current_slot}: {reassignment_count} LEOs reassigned to different MEOs")
-
+                    path, routing_stats = route_request_optimized(
+                        src_id, dst_id, leos, meos, agent, k_paths=2, max_hops=20
+                    )
                 except Exception as e:
-                    self.logger.warning(f"Dynamic MEO reassignment failed at slot {current_slot}: {e}")
+                    self.logger.debug(f"路由异常: {e}")
+                    path, routing_stats = [], {'success': False, 'error': str(e)}
 
-            # 5. 处理所有活跃的包
-            packets_to_remove = []
-            for packet_id, packet in active_packets.items():
-                reward = 0.0
+                routing_time = (datetime.now() - start_time).total_seconds()
 
-                if packet['status'] == 'new':
-                    # 新包需要进行路由决策
-                    reward = self.process_packet_routing(packet, agent, leos, meos, current_slot)
-
-                elif packet['status'] == 'forwarding':
-                    # 在转发中的包，每个slot只转发一跳
-                    reward = self.process_packet_single_hop(packet, leos, current_slot)
-
+                # 计算奖励
+                reward = self.calculate_routing_reward(
+                    path, routing_stats, src_id, dst_id, leos, meos, routing_time
+                )
                 total_reward += reward
 
-                # 检查包是否完成或失败
-                if packet['status'] in ['completed', 'failed']:
-                    packets_to_remove.append(packet_id)
-                    completed_packets.append(packet.copy())
+                # 统计成功路由
+                if routing_stats.get('success', False) and len(path) > 1:
+                    successful_routes += 1
+                    total_path_length += len(path) - 1
 
-                    if packet['status'] == 'completed':
-                        successful_routes += 1
-                        total_path_length += packet['hops_completed']
+                    # 检查是否快速收敛（路由时间短且路径合理）
+                    if routing_time < 0.1 and len(path) <= 10:
+                        quick_convergences += 1
 
-            # 6. 移除完成的包
-            for packet_id in packets_to_remove:
-                del active_packets[packet_id]
+                # 记录网络效率（每几个查询一次）
+                if routing_attempts % 20 == 0:
+                    try:
+                        topology_analysis = analyze_network_topology(leos, meos)
+                        network_efficiency = topology_analysis.get('network_efficiency', 0.0)
+                        self.network_efficiency_evolution.append({
+                            'episode': episode,
+                            'slot': current_slot,
+                            'efficiency': network_efficiency
+                        })
+                    except Exception as e:
+                        self.logger.debug(f"网络分析失败: {e}")
 
-            # 日志输出
-            if current_slot % 10 == 0:
-                active_count = len(active_packets)
-                new_count = len(new_queries)
-                if new_count > 0 or active_count > 0:
-                    self.logger.debug(f"Slot {current_slot}: New={new_count}, Active={active_count}")
+        # 记录MEO重分配统计
+        if meo_reassignments_this_episode > 0:
+            self.meo_reassignment_episodes.append(meo_reassignments_this_episode)
 
-        # 处理仍在转发中的包（超时）
-        for packet in active_packets.values():
-            packet['status'] = 'failed'
-            packet['end_slot'] = num_time_slots - 1
-            completed_packets.append(packet.copy())
-            timeout_penalty = self.config.get('environment.reward_timeout', -2.0)
-            total_reward += timeout_penalty
-
-        # 记录动态MEO统计信息
-        if meo_reassignments > 0:
-            self.cluster_reassignment_stats.append(meo_reassignments)
-
-        if topology_changes:
-            self.network_topology_stats.extend(topology_changes)
-
-        # 计算统计数据
+        # 计算统计指标
         success_rate = successful_routes / total_routes if total_routes > 0 else 0.0
         avg_path_length = total_path_length / successful_routes if successful_routes > 0 else 0.0
+        convergence_rate = quick_convergences / routing_attempts if routing_attempts > 0 else 0.0
 
-        if meo_reassignments > 0:
-            self.logger.info(
-                f"Episode completed: {successful_routes}/{total_routes} successful, "
-                f"avg_path_length: {avg_path_length:.2f}, MEO reassignments: {meo_reassignments}")
-        else:
-            self.logger.info(
-                f"Episode completed: {successful_routes}/{total_routes} successful, "
-                f"avg_path_length: {avg_path_length:.2f}")
+        return total_reward, success_rate, avg_path_length, convergence_rate
 
-        return total_reward, success_rate, avg_path_length
-
-    def process_packet_routing(self, packet: Dict, agent: RLAgent,
+    def calculate_routing_reward(self, path: List[int], routing_stats: Dict,
+                               src_id: int, dst_id: int,
                                leos: Dict[int, LEOSatellite],
                                meos: Dict[int, MEOSatellite],
-                               current_slot: int) -> float:
-        """处理包的路由决策阶段 - 支持动态MEO"""
+                               routing_time: float) -> float:
+        """
+        改进的奖励计算函数
+        """
+        base_reward = 0.0
 
-        src_id = packet['current_pos']
-        dst_id = packet['dst']
-
-        # 验证源和目标LEO是否存在于当前网络环境中
-        if src_id not in leos or dst_id not in leos:
-            packet['status'] = 'failed'
-            packet['end_slot'] = current_slot
-            failure_reward = self.config.get('environment.reward_failure', -5.0)
-            self.logger.debug(f"Packet {packet['id']}: Source or destination LEO not available")
-            return failure_reward
-
-        # 使用智能代理进行路由决策（考虑动态MEO位置）
-        try:
-            path, routing_stats = route_request_with_intelligent_edge_selection(
-                src_id, dst_id, leos, meos, agent
-            )
-        except Exception as e:
-            self.logger.debug(f"Packet {packet['id']}: Routing error - {e}")
-            packet['status'] = 'failed'
-            packet['end_slot'] = current_slot
-            failure_reward = self.config.get('environment.reward_failure', -5.0)
-            return failure_reward
-
-        if not path or len(path) < 2:
+        if not routing_stats.get('success', False) or len(path) < 2:
             # 路由失败
-            packet['status'] = 'failed'
-            packet['end_slot'] = current_slot
-            failure_reward = self.config.get('environment.reward_failure', -5.0)
-            self.logger.debug(f"Packet {packet['id']}: Routing failed from {src_id} to {dst_id}")
-            return failure_reward
+            failure_penalty = self.config.get('environment.reward_failure', -5.0)
+            return failure_penalty
 
-        # 验证路径有效性
-        if not self.validate_path(path, leos):
-            packet['status'] = 'failed'
-            packet['end_slot'] = current_slot
-            invalid_reward = self.config.get('environment.reward_failure', -5.0)
-            self.logger.debug(f"Packet {packet['id']}: Invalid path")
-            return invalid_reward
+        # 基础成功奖励
+        success_reward = self.config.get('environment.reward_success', 10.0)
+        base_reward += success_reward
 
-        # 路由成功，设置包的路径
-        packet['path'] = path
-        packet['path_index'] = 0  # 从路径起点开始
-        packet['routing_stats'] = routing_stats  # 保存路由统计信息
+        # 路径长度惩罚/奖励
+        path_length = len(path) - 1
+        if path_length > 0:
+            hop_penalty = self.config.get('environment.reward_hop', -0.1)
+            base_reward += hop_penalty * path_length
 
-        # 如果源和目标相同，直接完成
-        if src_id == dst_id:
-            packet['status'] = 'completed'
-            packet['end_slot'] = current_slot
-            packet['hops_completed'] = 0
-            success_reward = self.config.get('environment.reward_success', 10.0)
-            self.logger.debug(f"Packet {packet['id']}: Same src/dst, completed immediately")
-            return success_reward
+            # 路径效率奖励（相对于最短理论距离）
+            if src_id in leos and dst_id in leos:
+                src_leo = leos[src_id]
+                dst_leo = leos[dst_id]
+                theoretical_distance = abs(src_leo.latitude - dst_leo.latitude) + abs(src_leo.longitude - dst_leo.longitude)
+                if theoretical_distance > 0:
+                    efficiency = theoretical_distance / path_length
+                    base_reward += min(efficiency * 2.0, 5.0)  # 效率奖励，最大5分
 
-        # 开始转发流程
-        packet['status'] = 'forwarding'
-
-        # 给予路由成功奖励，考虑路由策略
-        routing_reward = self.config.get('environment.reward_routing_success', 1.0)
-
-        # 如果使用了跨集群路由，给予额外奖励
-        if routing_stats.get('routing_strategy') == 'inter_cluster_two_stage':
-            routing_reward += 0.5  # 跨集群路由额外奖励
-
-        self.logger.debug(f"Packet {packet['id']}: Route found with {len(path)} hops, "
-                         f"strategy: {routing_stats.get('routing_strategy', 'unknown')}")
-        return routing_reward
-
-    def process_packet_single_hop(self, packet: Dict,
-                                  leos: Dict[int, LEOSatellite],
-                                  current_slot: int) -> float:
-        """处理包的单跳转发 - 适应动态网络拓扑"""
-
-        # 检查是否已经到达路径末尾
-        if packet['path_index'] >= len(packet['path']) - 1:
-            # 已经在目标节点，完成传输
-            packet['status'] = 'completed'
-            packet['end_slot'] = current_slot
-            completion_reward = self.calculate_completion_reward(packet, leos)
-            self.logger.debug(f"Packet {packet['id']}: Completed transmission at slot {current_slot}")
-            return completion_reward
-
-        # 获取当前节点和下一跳节点
-        current_node = packet['path'][packet['path_index']]
-        next_node = packet['path'][packet['path_index'] + 1]
-
-        # 检查当前节点是否仍存在（动态网络拓扑）
-        if current_node not in leos:
-            packet['status'] = 'failed'
-            packet['end_slot'] = current_slot
-            node_lost_penalty = self.config.get('environment.reward_connection_lost', -1.0)
-            self.logger.debug(f"Packet {packet['id']}: Current node {current_node} no longer exists")
-            return node_lost_penalty
-
-        # 检查连接是否仍然存在（网络拓扑可能发生变化）
-        if next_node not in leos or next_node not in leos[current_node].neighbors:
-            # 连接断开，需要重新路由
-            packet['status'] = 'new'  # 重新进入路由阶段
-            packet['current_pos'] = current_node
-            packet['path'] = []  # 清空旧路径
-            packet['path_index'] = 0
-
-            connection_lost_penalty = self.config.get('environment.reward_connection_lost', -1.0)
-            self.logger.debug(f"Packet {packet['id']}: Connection lost from {current_node} to {next_node}, re-routing")
-            return connection_lost_penalty
-
-        # 执行单跳转发
-        packet['path_index'] += 1
-        packet['current_pos'] = next_node
-        packet['hops_completed'] += 1
-
-        # 更新目标卫星的负载
-        if next_node in leos:
-            leos[next_node].load += 1
-
-        # 检查是否到达目的地
-        if next_node == packet['dst']:
-            packet['status'] = 'completed'
-            packet['end_slot'] = current_slot
-
-            # 计算完成奖励
-            completion_reward = self.calculate_completion_reward(packet, leos)
-            self.logger.debug(
-                f"Packet {packet['id']}: Reached destination at slot {current_slot} after {packet['hops_completed']} hops")
-            return completion_reward
-
-        # 还在转发中，给予转发奖励
-        forwarding_reward = self.config.get('environment.reward_forwarding', 0.1)
-        self.logger.debug(f"Packet {packet['id']}: Forwarded to node {next_node} (hop {packet['hops_completed']})")
-        return forwarding_reward
-
-    def calculate_completion_reward(self, packet: Dict, leos: Dict[int, LEOSatellite]) -> float:
-        """计算包完成传输时的奖励 - 考虑动态MEO因素"""
-
-        # 基础完成奖励
-        reward = self.config.get('environment.reward_success', 10.0)
-
-        # 跳数效率奖励/惩罚
-        hop_penalty = self.config.get('environment.reward_hop', -0.1)
-        reward += hop_penalty * packet['hops_completed']
-
-        # 传输时延奖励/惩罚
-        if 'end_slot' in packet and 'start_slot' in packet:
-            transmission_delay = packet['end_slot'] - packet['start_slot']
-            delay_penalty = self.config.get('environment.reward_delay', -0.2)
-            reward += delay_penalty * transmission_delay
-
-            # 时延效率奖励：如果传输时延接近跳数，说明没有过多的重路由
-            if transmission_delay > 0 and packet['hops_completed'] > 0:
-                efficiency = packet['hops_completed'] / transmission_delay
-                if efficiency > 0.8:  # 效率较高
-                    reward += 1.0
-
-        # 负载均衡考虑
-        if packet['path'] and len(packet['path']) > 1:
+        # 负载均衡奖励
+        if len(path) > 1:
             path_loads = []
-            for sat_id in packet['path']:
-                if sat_id in leos:
-                    path_loads.append(leos[sat_id].load)
+            for leo_id in path:
+                if leo_id in leos:
+                    path_loads.append(leos[leo_id].load)
 
             if path_loads:
                 avg_load = sum(path_loads) / len(path_loads)
-                max_load = self.config.get('environment.max_load_per_satellite', 10)
+                max_load = self.config.get('network.max_load_per_satellite', 10)
 
-                # 负载均衡奖励
-                load_balance_reward = self.config.get('environment.reward_load_balance', 0.5)
                 if avg_load < max_load * 0.5:
-                    reward += load_balance_reward
-                elif avg_load > max_load * 0.8:
-                    reward -= load_balance_reward
+                    load_balance_reward = self.config.get('environment.reward_load_balance', 1.0)
+                    base_reward += load_balance_reward
 
         # 路由策略奖励
-        if 'routing_stats' in packet:
-            routing_strategy = packet['routing_stats'].get('routing_strategy', 'unknown')
-            if routing_strategy == 'inter_cluster_two_stage':
-                reward += 0.5  # 成功的跨集群路由额外奖励
+        routing_strategy = routing_stats.get('routing_strategy', 'unknown')
+        if routing_strategy == 'inter_cluster':
+            inter_cluster_reward = self.config.get('environment.reward_inter_cluster_success', 2.0)
+            base_reward += inter_cluster_reward
+        elif routing_strategy == 'intra_cluster':
+            base_reward += 0.5  # 集群内路由小奖励
 
-        return reward
+        # 路由时间奖励（快速路由给予奖励）
+        if routing_time < 0.05:  # 50ms以内
+            base_reward += 1.0
+        elif routing_time > 0.5:  # 超过500ms惩罚
+            base_reward -= 1.0
 
-    def validate_path(self, path: List[int], leos: Dict[int, LEOSatellite]) -> bool:
-        """验证路径的连通性 - 适应动态网络"""
-        if len(path) < 2:
-            return True
-
-        for i in range(len(path) - 1):
-            current_sat = path[i]
-            next_sat = path[i + 1]
-
-            # 检查当前卫星是否存在
-            if current_sat not in leos:
-                return False
-
-            # 检查连接是否存在
-            if next_sat not in leos[current_sat].neighbors:
-                return False
-
-        return True
-
-    def generate_random_route_request(self, leos: Dict[int, LEOSatellite]) -> Tuple[int, int]:
-        """生成随机路由请求"""
-        available_leos = list(leos.keys())
-        src_id = random.choice(available_leos)
-        dst_id = random.choice(available_leos)
-        return src_id, dst_id
+        return base_reward
 
     def save_model(self, agent: RLAgent, episode: int):
-        """保存模型 - 包含动态MEO训练信息"""
+        """保存模型"""
         model_path = self.config.get('output.model_save_path', 'models/')
         model_file = os.path.join(model_path, f'rl_agent_episode_{episode}.json')
 
-        model_data = {
+        model_data = agent.save_model()
+        model_data.update({
             'episode': episode,
-            'q_table': {str(k): v for k, v in agent.q_table.items()},
-            'learning_rate': agent.lr,
-            'gamma': agent.gamma,
-            'epsilon': agent.epsilon,
-            'dynamic_meo_enabled': True,  # 标记为动态MEO训练
+            'dynamic_meo_enabled': True,
             'training_stats': {
-                'total_reassignments': sum(self.cluster_reassignment_stats),
-                'topology_analyses': len(self.network_topology_stats)
+                'current_success_rate': self.episode_success_rates[-1] if self.episode_success_rates else 0.0,
+                'current_avg_path_length': self.episode_avg_path_lengths[-1] if self.episode_avg_path_lengths else 0.0,
+                'meo_reassignments': len(self.meo_reassignment_episodes)
             }
-        }
+        })
 
         with open(model_file, 'w') as f:
             json.dump(model_data, f, indent=2)
@@ -533,19 +375,17 @@ class TrainingEnvironment:
         self.logger.info(f"模型已保存到: {model_file}")
 
     def save_final_results(self, agent: RLAgent):
-        """保存最终结果 - 包含动态MEO统计"""
+        """保存最终结果"""
         results_path = self.config.get('output.results_path', 'results/')
 
         # 保存最终模型
         final_model_file = os.path.join(results_path, 'final_model.json')
-        model_data = {
-            'q_table': {str(k): v for k, v in agent.q_table.items()},
-            'learning_rate': agent.lr,
-            'gamma': agent.gamma,
-            'epsilon': agent.epsilon,
+        model_data = agent.save_model()
+        model_data.update({
             'dynamic_meo_enabled': True,
-            'training_completed': datetime.now().isoformat()
-        }
+            'training_completed': datetime.now().isoformat(),
+            'final_statistics': agent.get_statistics()
+        })
 
         with open(final_model_file, 'w') as f:
             json.dump(model_data, f, indent=2)
@@ -556,9 +396,11 @@ class TrainingEnvironment:
             'episode_rewards': self.episode_rewards,
             'episode_success_rates': self.episode_success_rates,
             'episode_avg_path_lengths': self.episode_avg_path_lengths,
-            'cluster_reassignment_stats': self.cluster_reassignment_stats,
-            'network_topology_stats': self.network_topology_stats,
-            'config': self.config.config
+            'episode_convergence_rates': self.episode_convergence_rates,
+            'meo_reassignment_episodes': self.meo_reassignment_episodes,
+            'network_efficiency_evolution': self.network_efficiency_evolution,
+            'config': self.config.config,
+            'final_agent_stats': agent.get_statistics()
         }
 
         with open(stats_file, 'w') as f:
@@ -567,61 +409,77 @@ class TrainingEnvironment:
         self.logger.info(f"最终结果已保存到: {results_path}")
 
     def plot_training_results(self):
-        """绘制训练结果 - 包含动态MEO相关图表"""
+        """绘制训练结果"""
         results_path = self.config.get('output.results_path', 'results/')
 
-        # 创建更大的图表布局以容纳额外的统计信息
-        fig_size = (20, 10) if self.cluster_reassignment_stats or self.network_topology_stats else (15, 5)
-        num_cols = 4 if self.cluster_reassignment_stats or self.network_topology_stats else 3
-
-        plt.figure(figsize=fig_size)
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+        fig.suptitle('MEO-LEO路由系统训练结果', fontsize=16)
 
         # 奖励曲线
-        plt.subplot(2, num_cols, 1)
-        plt.plot(self.episode_rewards)
-        plt.title('Training Rewards')
-        plt.xlabel('Episode')
-        plt.ylabel('Reward')
-        plt.grid(True)
+        axes[0, 0].plot(self.episode_rewards, 'b-', alpha=0.7)
+        # 添加平滑曲线
+        if len(self.episode_rewards) > 10:
+            smoothed = np.convolve(self.episode_rewards, np.ones(10)/10, mode='valid')
+            axes[0, 0].plot(range(9, len(self.episode_rewards)), smoothed, 'r-', linewidth=2, label='平滑曲线')
+            axes[0, 0].legend()
+        axes[0, 0].set_title('训练奖励')
+        axes[0, 0].set_xlabel('Episode')
+        axes[0, 0].set_ylabel('Reward')
+        axes[0, 0].grid(True, alpha=0.3)
 
         # 成功率曲线
-        plt.subplot(2, num_cols, 2)
-        plt.plot(self.episode_success_rates)
-        plt.title('Success Rate')
-        plt.xlabel('Episode')
-        plt.ylabel('Success Rate')
-        plt.grid(True)
+        axes[0, 1].plot(self.episode_success_rates, 'g-', alpha=0.7)
+        if len(self.episode_success_rates) > 10:
+            smoothed = np.convolve(self.episode_success_rates, np.ones(10)/10, mode='valid')
+            axes[0, 1].plot(range(9, len(self.episode_success_rates)), smoothed, 'r-', linewidth=2)
+        axes[0, 1].set_title('路由成功率')
+        axes[0, 1].set_xlabel('Episode')
+        axes[0, 1].set_ylabel('Success Rate')
+        axes[0, 1].set_ylim(0, 1)
+        axes[0, 1].grid(True, alpha=0.3)
 
         # 平均路径长度
-        plt.subplot(2, num_cols, 3)
-        plt.plot(self.episode_avg_path_lengths)
-        plt.title('Average Path Length')
-        plt.xlabel('Episode')
-        plt.ylabel('Path Length')
-        plt.grid(True)
+        axes[0, 2].plot(self.episode_avg_path_lengths, 'orange', alpha=0.7)
+        if len(self.episode_avg_path_lengths) > 10:
+            smoothed = np.convolve(self.episode_avg_path_lengths, np.ones(10)/10, mode='valid')
+            axes[0, 2].plot(range(9, len(self.episode_avg_path_lengths)), smoothed, 'r-', linewidth=2)
+        axes[0, 2].set_title('平均路径长度')
+        axes[0, 2].set_xlabel('Episode')
+        axes[0, 2].set_ylabel('Path Length')
+        axes[0, 2].grid(True, alpha=0.3)
 
-        # 如果有动态MEO统计，添加额外图表
-        if self.cluster_reassignment_stats:
-            plt.subplot(2, num_cols, 4)
-            plt.plot(self.cluster_reassignment_stats)
-            plt.title('MEO Cluster Reassignments')
-            plt.xlabel('Episode')
-            plt.ylabel('Reassignments')
-            plt.grid(True)
+        # 收敛率
+        axes[1, 0].plot(self.episode_convergence_rates, 'purple', alpha=0.7)
+        axes[1, 0].set_title('快速收敛率')
+        axes[1, 0].set_xlabel('Episode')
+        axes[1, 0].set_ylabel('Convergence Rate')
+        axes[1, 0].set_ylim(0, 1)
+        axes[1, 0].grid(True, alpha=0.3)
 
-        if self.network_topology_stats:
-            # 网络效率变化
-            plt.subplot(2, num_cols, 5)
-            slots = [stat['slot'] for stat in self.network_topology_stats]
-            efficiencies = [stat['analysis']['network_efficiency'] for stat in self.network_topology_stats]
-            plt.plot(slots, efficiencies)
-            plt.title('Network Efficiency Over Time')
-            plt.xlabel('Time Slot')
-            plt.ylabel('Network Efficiency')
-            plt.grid(True)
+        # MEO重分配统计
+        if self.meo_reassignment_episodes:
+            axes[1, 1].hist(self.meo_reassignment_episodes, bins=20, alpha=0.7, color='cyan')
+            axes[1, 1].set_title('MEO重分配分布')
+            axes[1, 1].set_xlabel('重分配次数')
+            axes[1, 1].set_ylabel('频次')
+        else:
+            axes[1, 1].text(0.5, 0.5, '无MEO重分配数据', ha='center', va='center', transform=axes[1, 1].transAxes)
+
+        # 网络效率演变
+        if self.network_efficiency_evolution:
+            episodes = [item['episode'] for item in self.network_efficiency_evolution]
+            efficiencies = [item['efficiency'] for item in self.network_efficiency_evolution]
+            axes[1, 2].scatter(episodes, efficiencies, alpha=0.6, s=10)
+            axes[1, 2].set_title('网络效率演变')
+            axes[1, 2].set_xlabel('Episode')
+            axes[1, 2].set_ylabel('Network Efficiency')
+        else:
+            axes[1, 2].text(0.5, 0.5, '无网络效率数据', ha='center', va='center', transform=axes[1, 2].transAxes)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(results_path, 'training_results.png'))
-        plt.show()
+        plt.savefig(os.path.join(results_path, 'training_results_enhanced.png'), dpi=300, bbox_inches='tight')
+
+        if self.config.get('output.plot_results', True):
+            plt.show()
 
         self.logger.info(f"训练结果图表已保存到: {results_path}")

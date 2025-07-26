@@ -1,4 +1,4 @@
-# MEO-LEO集群路由系统配置文件
+# MEO-LEO集群路由系统配置文件 - 改进版本
 
 # 数据配置
 data:
@@ -6,10 +6,11 @@ data:
 
 # 网络配置
 network:
-  num_time_slots: 10
+  num_time_slots: 50  # 增加时间槽数量
   max_load_per_satellite: 10
   enable_dynamic_meo: true
-  enable_dynamic_meo_reassignment: false
+  enable_dynamic_meo_reassignment: true  # 启用动态重分配
+  meo_reassignment_interval: 10  # 每10个时间槽重分配一次
 
 # 仿真配置
 simulation:
@@ -17,37 +18,47 @@ simulation:
 
 # 强化学习代理配置
 rl_agent:
-  learning_rate: 0.1
-  gamma: 0.9
-  epsilon: 0.1
-  epsilon_decay: 0.995
-  epsilon_min: 0.01
+  learning_rate: 0.01  # 降低学习率，避免过拟合
+  gamma: 0.95  # 提高折扣因子
+  epsilon: 0.3  # 增加初始探索率
+  epsilon_decay: 0.998  # 更慢的衰减
+  epsilon_min: 0.05  # 保持最小探索
+  experience_buffer_size: 50000  # 增大经验回放缓冲区
+  dynamic_learning_rate: true
 
 # 训练配置
 training:
-  num_episodes: 50
-  max_steps_per_episode: 30
-  save_interval: 25
+  num_episodes: 2000  # 大幅增加训练episodes
+  max_steps_per_episode: 50  # 增加每个episode的步数
+  save_interval: 100  # 更频繁的保存
+  max_queries_per_episode: 500  # 增加每个episode的查询数
+  enable_quick_convergence_tracking: true
+  enable_curriculum_learning: true  # 启用课程学习
 
-# 环境奖励配置
+# 环境奖励配置 - 调整奖励结构
 environment:
-  reward_success: 10.0
-  reward_failure: -5.0
-  reward_timeout: -2.0
-  reward_routing_success: 1.0
-  reward_forwarding: 0.1
-  reward_hop: -0.1
-  reward_delay: -0.2
-  reward_connection_lost: -1.0
-  reward_load_balance: 1.0
-  reward_inter_cluster_success: 2.0
-  reward_meo_adaptation: 0.5
+  reward_success: 20.0  # 增加成功奖励
+  reward_failure: -10.0  # 减少失败惩罚
+  reward_timeout: -5.0
+  reward_routing_success: 2.0
+  reward_forwarding: 0.2
+  reward_hop: -0.05  # 减少跳数惩罚
+  reward_delay: -0.1
+  reward_connection_lost: -2.0
+  reward_load_balance: 2.0
+  reward_inter_cluster_success: 5.0  # 增加跨集群成功奖励
+  reward_meo_adaptation: 1.0
+  reward_path_efficiency: 3.0  # 新增路径效率奖励
 
 # 路由配置
 routing:
   inter_cluster_routing_enabled: true
-  k_paths: 3
-  max_retries: 3
+  k_paths: 5  # 增加路径候选数
+  max_retries: 5
+  use_dijkstra_fallback: true
+  max_path_attempts: 10
+  enable_path_diversity: true  # 启用路径多样性
+  enable_load_balancing: true  # 启用负载均衡
 
 # 输出配置
 output:
@@ -57,3 +68,4 @@ output:
   results_path: "results/"
   plot_results: true
   save_meo_movement_stats: true
+  enable_detailed_logging: true  # 启用详细日志
